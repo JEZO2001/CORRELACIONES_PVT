@@ -1,136 +1,155 @@
 import xlwings as xw
 import numpy as np
+import math
 from PROYECTO.model import funciones
 from PROYECTO.model import graficas
 
 
 def main():
-    # 1. Conexión con el libro de Excel
+    # 1. CONEXIÓN CON EXCEL
     wb = xw.Book.caller()
-    sheet = wb.sheets[0]  # Trabajamos en la primera hoja
+    sheet = wb.sheets[0]
 
     try:
         # ---------------------------------------------------------
         # 2. LECTURA DE DATOS (INPUTS)
-        # Asume que los datos están en la columna B
+        # Mapeo exacto según tu imagen (Rango B4:B10)
         # ---------------------------------------------------------
-        # Temperatura del sistema (Fahrenheit)
-        T = sheet.range('B4').value
-        # Gravedad API del petróleo
-        API = sheet.range('B5').value
-        # Gravedad específica del gas (yg)
-        yg = sheet.range('B6').value
-        # Gravedad específica del petróleo (yo) - Opcional si se calcula con API
-        yo = sheet.range('B7').value
-        # Solubilidad del gas actual o de prueba (Rs) en scf/STB
-        Rs_input = sheet.range('B8').value
-        # Presión máxima del reservorio para la gráfica (psia)
-        P_res = sheet.range('B9').value
 
-        # Validación simple de datos
-        if None in [T, API, yg, Rs_input, P_res]:
-            sheet.range('D4').value = "Error: Faltan datos de entrada en la columna B."
+        # B4: Presión de burbuja (Pb)
+        Pb = sheet.range('B4').value
+
+        # B5: Relación Gas-Petróleo en burbuja (Rsb)
+        Rsb = sheet.range('B5').value
+
+        # B6: Gravedad API
+        API = sheet.range('B6').value
+
+        # B7: Gravedad específica del gas (SGgas / yg)
+        yg = sheet.range('B7').value
+
+        # B8: Presión del reservorio (Pr)
+        P_res = sheet.range('B8').value
+
+        # B9: Temperatura (T) en Fahrenheit
+        T = sheet.range('B9').value
+
+        # B10: Presión Atmosférica (Patm)
+        P_atm = sheet.range('B10').value
+
+        # Validación: Verificar que no falte ningún dato
+        if None in [Pb, Rsb, API, yg, P_res, T, P_atm]:
+            sheet.range('D4').value = "Error: Faltan datos en el rango B4:B10"
             return
 
         # ---------------------------------------------------------
-        # 3. CÁLCULOS (Llamando a funciones.py)
+        # 3. CÁLCULOS PREVIOS
         # ---------------------------------------------------------
 
-        # A) Calcular Presión de Burbuja (Pb) usando Standing
-        # Fuente: Correlación de Standing Pb [cite: 467]
-        Pb = funciones.standing_pb(Rs_input, yg, API, T)
+        # Calcular Gravedad específica del petróleo (yo) usando el API (B6)
+        yo = 141.5 / (131.5 + API)
 
-        # Enviar resultado numérico a Excel
-        sheet.range('B12').value = Pb  # Celda donde aparecerá el Pb calculado
-
-        # B) Generar barrido de presiones para las gráficas
-        # Crea 50 puntos desde 14.7 psi hasta la presión del reservorio
-        presiones = np.linspace(14.7, P_res, 50)
+        # Generar barrido de presiones desde Patm (B10) hasta Pr (B8)
+        # Agregamos 500 psi extra para ver la tendencia más allá de Pr si se desea
+        presiones = np.linspace(P_atm, P_res + 200, 60)
 
         valores_rs = []
         valores_bo = []
+        valores_mu = []
 
-        # C) Loop para calcular propiedades en cada presión
+        # Calculamos propiedades base en el punto de burbuja (Pb)
+        # para usarlas como referencia en la zona subsaturada
+        Bob = funciones.standing_bo_saturado(Rsb, yg, yo, T)
+        mu_od = funciones.beggs_robinson_mu_dead(API, T)
+        mu_ob = funciones.beggs_robinson_mu_saturado(mu_od, Rsb)
+
+        # ---------------------------------------------------------
+        # 4. BUCLE DE CÁLCULO (Propiedades vs Presión)
+        # ---------------------------------------------------------
         for p in presiones:
-            # --- Cálculo de Rs (Solubilidad) ---
+
+            # === ZONA SATURADA (Presión < Pb) ===
             if p < Pb:
-                # Si P < Pb, el gas se libera, Rs disminuye. Standing Rs [cite: 542]
+                # 1. Rs varía (Standing)
                 rs_calc = funciones.standing_rs(p, yg, API, T)
-            else:
-                # Si P >= Pb, el Rs es constante (todo el gas está disuelto)
-                rs_calc = Rs_input
-            valores_rs.append(rs_calc)
 
-            # --- Cálculo de Bo (Factor Volumétrico) ---
-            if p < Pb:
-                # Zona Saturada (Standing) [cite: 702]
+                # 2. Bo saturado
                 bo_calc = funciones.standing_bo_saturado(rs_calc, yg, yo, T)
+
+                # 3. Viscosidad saturada
+                mu_calc = funciones.beggs_robinson_mu_saturado(mu_od, rs_calc)
+
+            # === ZONA SUBSATURADA (Presión >= Pb) ===
             else:
-                # Zona Subsaturada (P > Pb)
-                # Primero calculamos Bo en el punto de burbuja
-                Bob = funciones.standing_bo_saturado(Rs_input, yg, yo, T)
-                # Compresibilidad (Co) - Usando Vasquez-Beggs como ejemplo [cite: 638]
-                # Nota: Para simplificar aquí usaremos un Co promedio,
-                # pero idealmente deberías llamar a funciones.vasquez_beggs_co(...)
-                Co = 0.000015
+                # 1. Rs constante (igual a Rsb de la celda B5)
+                rs_calc = Rsb
 
-                # Fórmula subsaturada [cite: 761]
-                import math
-                bo_calc = Bob * math.exp(
-                    Co * (Pb - p))  # Nota: revisar signo según convención
+                # 2. Calcular Compresibilidad (Co) instantánea
+                co_calc = funciones.vasquez_beggs_co(Rsb, yg, API, T, p)
+
+                # 3. Bo Subsaturado (Comprimiendo desde Bob)
+                bo_calc = funciones.bo_subsaturado(Bob, co_calc, Pb, p)
+
+                # 4. Viscosidad Subsaturada
+                mu_calc = funciones.vasquez_beggs_mu_subsaturado(mu_ob, p, Pb)
+
+            # Guardar datos
+            valores_rs.append(rs_calc)
             valores_bo.append(bo_calc)
+            valores_mu.append(mu_calc)
 
         # ---------------------------------------------------------
-        # 4. GRAFICACIÓN (Llamando a graficas.py)
+        # 5. GENERACIÓN DE GRÁFICAS
         # ---------------------------------------------------------
 
-        # Crear gráfica de Rs vs Presión
-        fig_rs = graficas.crear_grafica_pv(
-            presiones,
-            valores_rs,
-            "Rs (scf/STB)",
-            "Solubilidad del Gas vs Presión"
+        # Gráfica Rs
+        fig_rs = graficas.crear_grafica_propiedad(
+            presiones, valores_rs, Pb, "Rs (scf/STB)", "Solubilidad vs Presión"
         )
 
-        # Crear gráfica de Bo vs Presión
-        fig_bo = graficas.crear_grafica_pv(
-            presiones,
-            valores_bo,
-            "Bo (bbl/STB)",
-            "Factor Volumétrico vs Presión"
+        # Gráfica Bo
+        fig_bo = graficas.crear_grafica_propiedad(
+            presiones, valores_bo, Pb, "Bo (bbl/STB)", "Factor Vol. vs Presión"
+        )
+
+        # Gráfica Viscosidad
+        fig_mu = graficas.crear_grafica_propiedad(
+            presiones, valores_mu, Pb, "Mu (cp)", "Viscosidad vs Presión"
         )
 
         # ---------------------------------------------------------
-        # 5. SALIDA VISUAL A EXCEL
+        # 6. SALIDA A EXCEL
         # ---------------------------------------------------------
 
-        # Pegar gráfica de Rs
-        sheet.pictures.add(
-            fig_rs,
-            name='Plot_Rs',
-            update=True,
-            left=sheet.range('E4').left,
-            top=sheet.range('E4').top,
-            scale=0.8
-        )
+        def pegar_grafica(figura, nombre, celda_ref):
+            # Limpiar gráfica anterior si existe
+            if sheet.pictures.count > 0:
+                try:
+                    sheet.pictures[nombre].delete()
+                except:
+                    pass
 
-        # Pegar gráfica de Bo
-        sheet.pictures.add(
-            fig_bo,
-            name='Plot_Bo',
-            update=True,
-            left=sheet.range('E25').left,  # Más abajo
-            top=sheet.range('E25').top,
-            scale=0.8
-        )
+            # Pegar nueva gráfica
+            sheet.pictures.add(
+                figura,
+                name=nombre,
+                update=True,
+                left=sheet.range(celda_ref).left,
+                top=sheet.range(celda_ref).top,
+                scale=0.8
+            )
 
-        sheet.range('D4').value = "Cálculo completado exitosamente."
+        # Ubicación de las gráficas (Columna E, a la derecha de tus datos)
+        pegar_grafica(fig_rs, 'Plot_Rs', 'E4')
+        pegar_grafica(fig_bo, 'Plot_Bo', 'E23')
+        pegar_grafica(fig_mu, 'Plot_Mu', 'M4')
+
+        sheet.range('D4').value = "Cálculo Finalizado Correctamente"
 
     except Exception as e:
-        sheet.range('D4').value = f"Error en Python: {str(e)}"
+        sheet.range('D4').value = f"Error: {str(e)}"
 
 
-# Bloque para probar localmente sin abrir Excel (mock caller)
 if __name__ == "__main__":
-    xw.Book("testdoftwaree.xlsm").set_mock_caller()
+    xw.Book("TuArchivo.xlsm").set_mock_caller()
     main()
