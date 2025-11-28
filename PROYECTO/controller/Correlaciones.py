@@ -1,155 +1,134 @@
 import xlwings as xw
+import pandas as pd
 import numpy as np
-import math
+# Importación absoluta
 from PROYECTO.model import funciones
 from PROYECTO.model import graficas
 
 
 def main():
-    # 1. CONEXIÓN CON EXCEL
     wb = xw.Book.caller()
-    sheet = wb.sheets[0]
+
+    # 1. DEFINIR HOJAS
+    sheet_inputs = wb.sheets.active
+
+    # Manejo de la hoja "Resultados"
+    try:
+        sheet_results = wb.sheets['Resultados']
+        sheet_results.clear()
+        for pic in sheet_results.pictures:
+            pic.delete()
+    except:
+        sheet_results = wb.sheets.add('Resultados', after=sheet_inputs)
 
     try:
-        # ---------------------------------------------------------
-        # 2. LECTURA DE DATOS (INPUTS)
-        # Mapeo exacto según tu imagen (Rango B4:B10)
-        # ---------------------------------------------------------
+        # 2. LEER INPUTS
+        Pb_input = sheet_inputs.range('B4').value
+        Rsb_input = sheet_inputs.range('B5').value
+        API_input = sheet_inputs.range('B6').value
+        yg_input = sheet_inputs.range('B7').value
+        P_res = sheet_inputs.range('B8').value
+        T_input = sheet_inputs.range('B9').value
+        P_atm = sheet_inputs.range('B10').value
 
-        # B4: Presión de burbuja (Pb)
-        Pb = sheet.range('B4').value
+        if P_atm is None: P_atm = 14.7
 
-        # B5: Relación Gas-Petróleo en burbuja (Rsb)
-        Rsb = sheet.range('B5').value
+        # 3. CÁLCULOS
+        yo = funciones.calcular_gamma_o(API_input)
+        presiones = funciones.generar_presiones(P_res, P_atm)
 
-        # B6: Gravedad API
-        API = sheet.range('B6').value
+        lista_rs, lista_bo, lista_mu, lista_rho, lista_co = [], [], [], [], []
 
-        # B7: Gravedad específica del gas (SGgas / yg)
-        yg = sheet.range('B7').value
-
-        # B8: Presión del reservorio (Pr)
-        P_res = sheet.range('B8').value
-
-        # B9: Temperatura (T) en Fahrenheit
-        T = sheet.range('B9').value
-
-        # B10: Presión Atmosférica (Patm)
-        P_atm = sheet.range('B10').value
-
-        # Validación: Verificar que no falte ningún dato
-        if None in [Pb, Rsb, API, yg, P_res, T, P_atm]:
-            sheet.range('D4').value = "Error: Faltan datos en el rango B4:B10"
-            return
-
-        # ---------------------------------------------------------
-        # 3. CÁLCULOS PREVIOS
-        # ---------------------------------------------------------
-
-        # Calcular Gravedad específica del petróleo (yo) usando el API (B6)
-        yo = 141.5 / (131.5 + API)
-
-        # Generar barrido de presiones desde Patm (B10) hasta Pr (B8)
-        # Agregamos 500 psi extra para ver la tendencia más allá de Pr si se desea
-        presiones = np.linspace(P_atm, P_res + 200, 60)
-
-        valores_rs = []
-        valores_bo = []
-        valores_mu = []
-
-        # Calculamos propiedades base en el punto de burbuja (Pb)
-        # para usarlas como referencia en la zona subsaturada
-        Bob = funciones.standing_bo_saturado(Rsb, yg, yo, T)
-        mu_od = funciones.beggs_robinson_mu_dead(API, T)
-        mu_ob = funciones.beggs_robinson_mu_saturado(mu_od, Rsb)
-
-        # ---------------------------------------------------------
-        # 4. BUCLE DE CÁLCULO (Propiedades vs Presión)
-        # ---------------------------------------------------------
         for p in presiones:
+            # --- ZONA SUBSATURADA (P > Pb) ---
+            if p > Pb_input:
+                rs = Rsb_input
+                co = funciones.vasquez_beggs_co(Rsb_input, yg_input, API_input, T_input,
+                                                p)
 
-            # === ZONA SATURADA (Presión < Pb) ===
-            if p < Pb:
-                # 1. Rs varía (Standing)
-                rs_calc = funciones.standing_rs(p, yg, API, T)
+                bob = funciones.standing_bo_saturado(Rsb_input, yg_input, yo, T_input)
+                bo = funciones.bo_subsaturado(bob, co, Pb_input, p)
 
-                # 2. Bo saturado
-                bo_calc = funciones.standing_bo_saturado(rs_calc, yg, yo, T)
+                rho_ob = funciones.standing_densidad_saturado(Rsb_input, yg_input, yo,
+                                                              T_input)
+                rho = funciones.densidad_subsaturado(rho_ob, co, Pb_input, p)
 
-                # 3. Viscosidad saturada
-                mu_calc = funciones.beggs_robinson_mu_saturado(mu_od, rs_calc)
+                mu_od = funciones.beggs_robinson_mu_dead(API_input, T_input)
+                mu_ob = funciones.beggs_robinson_mu_saturado(mu_od, Rsb_input)
+                mu = funciones.vasquez_beggs_mu_subsaturado(mu_ob, p, Pb_input)
 
-            # === ZONA SUBSATURADA (Presión >= Pb) ===
+            # --- ZONA SATURADA (P <= Pb) ---
             else:
-                # 1. Rs constante (igual a Rsb de la celda B5)
-                rs_calc = Rsb
+                rs = funciones.standing_rs(p, yg_input, API_input, T_input)
+                co = 0
 
-                # 2. Calcular Compresibilidad (Co) instantánea
-                co_calc = funciones.vasquez_beggs_co(Rsb, yg, API, T, p)
+                bo = funciones.standing_bo_saturado(rs, yg_input, yo, T_input)
 
-                # 3. Bo Subsaturado (Comprimiendo desde Bob)
-                bo_calc = funciones.bo_subsaturado(Bob, co_calc, Pb, p)
+                rho = funciones.standing_densidad_saturado(rs, yg_input, yo, T_input)
 
-                # 4. Viscosidad Subsaturada
-                mu_calc = funciones.vasquez_beggs_mu_subsaturado(mu_ob, p, Pb)
+                mu_od = funciones.beggs_robinson_mu_dead(API_input, T_input)
+                mu = funciones.beggs_robinson_mu_saturado(mu_od, rs)
 
-            # Guardar datos
-            valores_rs.append(rs_calc)
-            valores_bo.append(bo_calc)
-            valores_mu.append(mu_calc)
+            lista_rs.append(rs)
+            lista_bo.append(bo)
+            lista_mu.append(mu)
+            lista_rho.append(rho)
+            lista_co.append(co)
 
-        # ---------------------------------------------------------
-        # 5. GENERACIÓN DE GRÁFICAS
-        # ---------------------------------------------------------
+        # 4. EXPORTAR RESULTADOS
+        sheet_results.range('A1').value = "Tabla de Resultados PVT"
 
+        df = pd.DataFrame({
+            'Presión (psia)': presiones,
+            'Rs (scf/STB)': lista_rs,
+            'Bo (bbl/STB)': lista_bo,
+            'Viscosidad (cp)': lista_mu,
+            'Densidad (lb/ft3)': lista_rho,
+            'Co (1/psi)': lista_co
+        })
+
+        sheet_results.range('A3').value = df
+
+        # 5. GENERAR GRÁFICAS
         # Gráfica Rs
-        fig_rs = graficas.crear_grafica_propiedad(
-            presiones, valores_rs, Pb, "Rs (scf/STB)", "Solubilidad vs Presión"
-        )
+        fig_rs = graficas.crear_grafica_propiedad(presiones, lista_rs, Pb_input,
+                                                  "Rs (scf/STB)",
+                                                  "Solubilidad vs Presión")
+        sheet_results.pictures.add(fig_rs, name='Plot_Rs', update=True,
+                                   left=sheet_results.range('H3').left,
+                                   top=sheet_results.range('H3').top)
 
         # Gráfica Bo
-        fig_bo = graficas.crear_grafica_propiedad(
-            presiones, valores_bo, Pb, "Bo (bbl/STB)", "Factor Vol. vs Presión"
-        )
+        fig_bo = graficas.crear_grafica_propiedad(presiones, lista_bo, Pb_input,
+                                                  "Bo (bbl/STB)",
+                                                  "Factor Volumétrico vs Presión")
+        sheet_results.pictures.add(fig_bo, name='Plot_Bo', update=True,
+                                   left=sheet_results.range('H20').left,
+                                   top=sheet_results.range('H20').top)
 
         # Gráfica Viscosidad
-        fig_mu = graficas.crear_grafica_propiedad(
-            presiones, valores_mu, Pb, "Mu (cp)", "Viscosidad vs Presión"
-        )
+        fig_mu = graficas.crear_grafica_propiedad(presiones, lista_mu, Pb_input,
+                                                  "Viscosidad (cp)",
+                                                  "Viscosidad vs Presión")
+        sheet_results.pictures.add(fig_mu, name='Plot_Mu', update=True,
+                                   left=sheet_results.range('N3').left,
+                                   top=sheet_results.range('N3').top)
 
-        # ---------------------------------------------------------
-        # 6. SALIDA A EXCEL
-        # ---------------------------------------------------------
+        # Gráfica Densidad
+        fig_rho = graficas.crear_grafica_propiedad(presiones, lista_rho, Pb_input,
+                                                   "Densidad (lb/ft3)",
+                                                   "Densidad vs Presión")
+        sheet_results.pictures.add(fig_rho, name='Plot_Rho', update=True,
+                                   left=sheet_results.range('N20').left,
+                                   top=sheet_results.range('N20').top)
 
-        def pegar_grafica(figura, nombre, celda_ref):
-            # Limpiar gráfica anterior si existe
-            if sheet.pictures.count > 0:
-                try:
-                    sheet.pictures[nombre].delete()
-                except:
-                    pass
-
-            # Pegar nueva gráfica
-            sheet.pictures.add(
-                figura,
-                name=nombre,
-                update=True,
-                left=sheet.range(celda_ref).left,
-                top=sheet.range(celda_ref).top,
-                scale=0.8
-            )
-
-        # Ubicación de las gráficas (Columna E, a la derecha de tus datos)
-        pegar_grafica(fig_rs, 'Plot_Rs', 'E4')
-        pegar_grafica(fig_bo, 'Plot_Bo', 'E23')
-        pegar_grafica(fig_mu, 'Plot_Mu', 'M4')
-
-        sheet.range('D4').value = "Cálculo Finalizado Correctamente"
+        sheet_inputs.range('D4').value = "¡Cálculos listos en hoja Resultados!"
+        sheet_results.activate()
 
     except Exception as e:
-        sheet.range('D4').value = f"Error: {str(e)}"
+        sheet_inputs.range('D4').value = f"Error: {str(e)}"
 
 
 if __name__ == "__main__":
-    xw.Book("TuArchivo.xlsm").set_mock_caller()
+    xw.Book("Correlaciones.xlsm").set_mock_caller()
     main()
